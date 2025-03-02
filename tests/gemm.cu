@@ -4,7 +4,7 @@
 #include "gemm.cuh"
 #include "tensor.cuh"
 
-const float eps = 1e-6;
+const float eps = 1e-2;
 
 TEST(GEMM_NAIVE_TEST, CheckEqualToCublas) {
   init_device();

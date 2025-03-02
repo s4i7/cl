@@ -1,13 +1,10 @@
 #include "device.cuh"
+#include "macros.cuh"
 #include <cstdio>
 
 auto init_device(bool list_devices) -> int {
   int deviceCount;
-  auto err = cudaGetDeviceCount(&deviceCount);
-  if (deviceCount == 0) {
-    std::printf("No cuda-compatible devices found.\n");
-    return 1;
-  }
+  CUDA_CALL(cudaGetDeviceCount(&deviceCount));
 
   if (list_devices) {
     std::printf("Found %d device(s)\n", deviceCount);
@@ -18,10 +15,6 @@ auto init_device(bool list_devices) -> int {
     }
   }
 
-  err = cudaSetDevice(0);
-  if (err != cudaSuccess) {
-    std::printf("Failed to set device: %s\n", cudaGetErrorString(err));
-    return 1;
-  }
+  CUDA_CALL(cudaSetDevice(0));
   return 0;
 }
