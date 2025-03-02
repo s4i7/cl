@@ -1,6 +1,11 @@
+#cuda
 *.i
 *.ii
 *.gpu
 *.ptx
 *.cubin
 *.fatbin
+
+#folders
+build/
+.cache

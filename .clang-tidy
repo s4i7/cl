@@ -1,0 +1,1 @@
+Checks: 'cuda-*,modernize-*,-modernize-avoid-c-arrays'
