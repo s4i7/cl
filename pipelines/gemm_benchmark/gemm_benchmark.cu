@@ -6,9 +6,9 @@
 #include <cuda_fp16.h>
 #include "gemm.cuh"
 #include "device.cuh"
-#include "tensor.cuh"
 #include <nvtx3/nvToolsExt.h>
 #include <string>
+#include <map>
 using i64 = int64_t;
 
 constexpr float EPS = 1e-2;
@@ -31,95 +31,73 @@ auto matmul_naive_vs_cublas() -> int {
   int k = 4096;
   int m = 4096;
 
-  int BLOCK_SIZE = 1024;
-  int NUM_BLOCKS = (n * m + BLOCK_SIZE - 1) / BLOCK_SIZE;
-
-  float *d_a, *d_b, *d_c_ref, *d_c;
+  float *d_a, *d_b, *d_c;
   nvtxRangePush("matrix memory allocation");
   cudaMalloc(&d_a, n * k * sizeof(float));
   cudaMalloc(&d_b, k * m * sizeof(float));
-  cudaMalloc(&d_c_ref, n * m * sizeof(float));
   cudaMalloc(&d_c, n * m * sizeof(float));
   nvtxRangePop();
 
-  auto run = [&](int iter_num, std::string name, float eps) -> int {
+  auto F_gemm_tiled = [&]() -> void {
+    const int bsz = 32;
+    dim3 gdim(n / bsz, m / bsz);
+    dim3 bdim(bsz * bsz);
+    gemm_tiled<bsz><<<gdim, bdim>>>(d_c, d_a, d_b, n, k, m);
+  };
+
+  auto F_gemm_tiled_smem = [&]() -> void {
+    const int bsz = 32;
+    dim3 gdim(n / bsz, m / bsz);
+    dim3 bdim(bsz * bsz);
+    gemm_tiled_smem<bsz><<<gdim, bdim>>>(d_c, d_a, d_b, n, k, m);
+  };
+
+  cublasHandle_t handle;
+
+  auto F_cublas_sgemm = [&]() -> void {
     float alpha = 1.0, beta = 0.0;
-    i64 total_smem_time = 0, total_cublas_time = 0, total_tiled_time = 0;
+    cublasSgemm_v2(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k, &alpha, d_b, m, d_a, k, &beta, d_c, m);
+  };
 
-    curandState *s_a, *s_b;
-    cudaMalloc(&s_a, n * k * sizeof(curandState));
-    cudaMalloc(&s_b, k * m * sizeof(curandState));
+  auto kernel_exec = [&](auto &&f, const std::string& name) -> std::pair<std::string,i64> {
+    cudaEvent_t tst, tend;
+    cudaEventCreate(&tst);
+    cudaEventCreate(&tend);
+    nvtxRangePush((name + " execution").c_str());
+    cudaEventRecord(tst);
+    f();
+    cudaEventRecord(tend);
+    nvtxRangePop();
+    cudaDeviceSynchronize();
+    return {name, get_microseconds(tst, tend)};
+  };
 
-    cublasHandle_t handle;
+  auto run = [&](int iter_num, std::string name, float eps) -> int {
     cublasCreate_v2(&handle);
-
+    std::map<std::string, i64> times;
+    auto rec = [&](const std::pair<std::string, i64> &r) -> void {
+      times[r.first] += r.second;
+    };
+    
     for (int iter=0; iter<iter_num; iter++) {
-      initCurandStates<<<NUM_BLOCKS, BLOCK_SIZE>>>(s_a, time(nullptr), n, k);
-      initCurandStates<<<NUM_BLOCKS, BLOCK_SIZE>>>(s_b, time(nullptr), k, m);
+      rec(kernel_exec(F_gemm_tiled, "gemm_tiled"));
 
-      generateRandomMatrix<<<NUM_BLOCKS, BLOCK_SIZE>>>(d_a, s_a, n, k);
-      generateRandomMatrix<<<NUM_BLOCKS, BLOCK_SIZE>>>(d_b, s_b, k, m);
+      rec(kernel_exec(F_gemm_tiled_smem, "gemm_tiled_smem"));
 
-      cudaDeviceSynchronize();
-
-      cudaEvent_t tiled_start, tiled_end;
-      cudaEventCreate(&tiled_start);
-      cudaEventCreate(&tiled_end);
-      dim3 gridDim(4096 / 32, 4096 / 32);
-      dim3 blockDim(32 * 32);
-      nvtxRangePush("gemm_tiled execution");
-      cudaEventRecord(tiled_start);
-      gemm_tiled<32><<<gridDim, blockDim>>>(d_c, d_a, d_b, n, k, m);
-      cudaEventRecord(tiled_end);
-      nvtxRangePop();
-
-      cudaDeviceSynchronize();
-
-      cudaEvent_t smem_start, smem_end;
-      cudaEventCreate(&smem_start);
-      cudaEventCreate(&smem_end);
-      const int blocksz = 32;
-      dim3 gridDimSmem(n / blocksz, m / blocksz);
-      dim3 blockDimSmem(blocksz * blocksz);
-      nvtxRangePush("gemm_smem execution");
-      cudaEventRecord(smem_start);
-      gemm_tiled_smem<blocksz><<<gridDimSmem, blockDimSmem>>>(d_c, d_a, d_b, n, k, m);
-      cudaEventRecord(smem_end);
-      nvtxRangePop();
-
-      cudaDeviceSynchronize();
-
-      cudaEvent_t cublas_start, cublas_end;
-      cudaEventCreate(&cublas_start);
-      cudaEventCreate(&cublas_end);
-
-      nvtxRangePush("cublas sgemm execution");
-      cudaEventRecord(cublas_start);
-      cublasSgemm_v2(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k, &alpha, d_b, m, d_a, k, &beta, d_c_ref, m);
-      cudaEventRecord(cublas_end);
-      nvtxRangePop();
-
-      cudaDeviceSynchronize();
-
-      total_smem_time += get_microseconds(smem_start, smem_end);
-      total_cublas_time += get_microseconds(cublas_start, cublas_end);
-      total_tiled_time += get_microseconds(tiled_start, tiled_end);
+      rec(kernel_exec(F_cublas_sgemm, "cublas_sgemm"));
     }
 
-    i64 average_smem_time = total_smem_time / iter_num;
-    i64 average_cublas_time = total_cublas_time / iter_num;
-    i64 average_tiled_time = total_tiled_time / iter_num;
-    double average_smem_flops = ((2.0 * n * m * k) / average_smem_time) / 1e3;
-    double average_coalesced_flops = ((2.0 * n * m * k) / average_tiled_time) / 1e3;
+    std::map<std::string, double> flops;
+    for (auto &[tk, tv] : times) {
+      tv /= iter_num;
+      flops[tk] = ((2.0 * n * m * k / tv)) / 1e3;
+    }
 
-    std::printf("%s avg smem time: %ld\n", name.c_str(), average_smem_time);
-    std::printf("%s avg smem gflops: %lf\n", name.c_str(), average_smem_flops);
-    std::printf("%s avg tiled time: %ld\n", name.c_str(), average_tiled_time);
-    std::printf("%s avg tiled gflops: %lf\n", name.c_str(), average_coalesced_flops);
-    std::printf("%s avg cublas time: %ld\n", name.c_str(), average_cublas_time);
+    for (auto &[tk, tv] : times) {
+      std::printf("%s avg %s time: %ld\n", name.c_str(), tk.c_str(), tv);
+      std::printf("%s avg %s gflops: %lf\n", name.c_str(), tk.c_str(), flops[tk]);
+    }
 
-    cudaFree(s_a);
-    cudaFree(s_b);
     cublasDestroy_v2(handle);
     return 0;
   };
@@ -142,7 +120,6 @@ auto matmul_naive_vs_cublas() -> int {
   cudaFree(d_a);
   cudaFree(d_b);
   cudaFree(d_c);
-  cudaFree(d_c_ref);
   return 0;
 }
 
