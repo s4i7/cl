@@ -1,3 +1,4 @@
+#pragma once
 #include <cuda_runtime.h>
 
 __global__ void gemm_naive(float *c, float *a, float *b, int n, int k, int m);
@@ -14,47 +15,6 @@ __global__ void gemm_tiled(float *c, float *a, float *b, int n, int k, int m) {
     }
     c[x * m + y] = tmp;
   }
-}
-
-template <const int BN, const int BK, const int BM>
-__global__ void gemm(float *c, float *a, float *b, int n, int k, int m) {
-  const int crow = blockIdx.x * BN;
-  const int ccol = blockIdx.y * BM;
-  const int threadrow = threadIdx.x / BM;
-  const int threadcol = threadIdx.x % BM;
-  __shared__ float As[BN * BK];
-  __shared__ float Bs[BK * BM];
-
-  a += crow * k;
-  b += ccol;
-  c += crow * m + ccol;
-
-  float tmp = 0.0;
-
-  for (int block_idx = 0; block_idx < k; block_idx += BK) {
-    if (threadIdx.x < BN * BK) {
-      const int asRow = threadIdx.x / BK;
-      const int asCol = threadIdx.x % BK;
-      As[asRow * BK + asCol] = a[asRow * k + asCol];
-    } else {
-      const int btIdx = threadIdx.x - BN * BK;
-      const int bsRow = btIdx / BM;
-      const int bsCol = btIdx % BM;
-      Bs[bsRow * BM + bsCol] = b[bsRow * m + bsCol];
-    }
-
-    __syncthreads();
-    a += BK;
-    b += BK * m; 
-
-    for (int l=0; l < BK; l++) {
-      //tmp += As[threadrow * BLOCKSIZE + l] * Bs[l * BLOCKSIZE + threadcol];
-    }
-
-    __syncthreads();
-  }
-
-  c[threadrow * m + threadcol] = tmp;
 }
 
 template <const int BLOCKSIZE>
@@ -88,4 +48,47 @@ __global__ void gemm_tiled_smem(float *c, float *a, float *b, int n, int k, int 
   }
 
   c[threadrow * m + threadcol] = tmp;
+}
+
+template <const int BN, const int BK, const int BM, const int TN>
+__global__ void gemm_1d_blocktiling(float *c, float *a, float *b, int n, int k, int m) {
+  const int crow = blockIdx.x * BN;
+  const int ccol = blockIdx.y * BM;
+  const int threadrow = threadIdx.x / BM;
+  const int threadcol = threadIdx.x % BM;
+  __shared__ float As[BN * BK];
+  __shared__ float Bs[BK * BM];
+
+  a += crow * k;
+  b += ccol;
+  c += crow * m + ccol;
+
+  const int asRow = threadIdx.x / BK;
+  const int asCol = threadIdx.x % BK;
+  const int bsRow = threadIdx.x / BM;
+  const int bsCol = threadIdx.x % BM;
+
+  float tv[TN] = {0.0};
+
+  for (int block_idx = 0; block_idx < k; block_idx += BK) {
+    As[asRow * BK + asCol] = a[asRow * k + asCol];
+    Bs[bsRow * BM + bsCol] = b[bsRow * m + bsCol];
+
+    __syncthreads();
+    a += BK;
+    b += BK * m; 
+
+    for (int bsI=0; bsI < BK; bsI++) {
+      float bv = Bs[bsI * BM + threadcol];
+      for (int rI=0; rI < TN; rI++) {
+        tv[rI] += As[(threadrow * TN + rI) * BK + bsI] * bv;
+      }
+    }
+
+    __syncthreads();
+  }
+
+  for (int rI=0; rI < TN; rI++) {
+    c[(threadrow * TN + rI) * m + threadcol] = tv[rI];
+  }
 }

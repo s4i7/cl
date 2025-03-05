@@ -6,6 +6,7 @@
 #include <cuda_fp16.h>
 #include "gemm.cuh"
 #include "device.cuh"
+#include "macros.cuh"
 #include <nvtx3/nvToolsExt.h>
 #include <string>
 #include <map>
@@ -59,6 +60,16 @@ auto matmul_naive_vs_cublas() -> int {
     cublasSgemm_v2(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k, &alpha, d_b, m, d_a, k, &beta, d_c, m);
   };
 
+  auto F_gemm_1d_blocktiling = [&]() -> void {
+    const int BN = 64;
+    const int BM = 64;
+    const int BK = 8;
+    const int TN = 8;
+    dim3 gdim(n / BN, m / BM);
+    dim3 bdim((BN * BM) / TN);
+    gemm_1d_blocktiling<BN, BK, BM, TN><<<gdim, bdim>>>(d_c, d_a, d_b, n, k, m);
+  };
+
   auto kernel_exec = [&](auto &&f, const std::string& name) -> std::pair<std::string,i64> {
     cudaEvent_t tst, tend;
     cudaEventCreate(&tst);
@@ -85,6 +96,8 @@ auto matmul_naive_vs_cublas() -> int {
       rec(kernel_exec(F_gemm_tiled_smem, "gemm_tiled_smem"));
 
       rec(kernel_exec(F_cublas_sgemm, "cublas_sgemm"));
+
+      rec(kernel_exec(F_gemm_1d_blocktiling, "gemm_1d_blocktiling"));
     }
 
     std::map<std::string, double> flops;
