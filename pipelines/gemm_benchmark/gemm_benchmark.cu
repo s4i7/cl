@@ -1,16 +1,22 @@
+#include <algorithm>
 #include <cstdio>
 #include <ctime>
-#include <cuda_runtime.h>
-#include <cublas_v2.h>
+#include <map>
+#include <string>
+#include <vector>
+
 #include <cublasLt.h>
+#include <cublas_v2.h>
 #include <cuda_fp16.h>
+#include <cuda_runtime.h>
+#include <nvtx3/nvToolsExt.h>
+
 #include "gemm.cuh"
 #include "device.cuh"
 #include "macros.cuh"
-#include <nvtx3/nvToolsExt.h>
-#include <string>
-#include <map>
+
 using i64 = int64_t;
+using namespace std;
 
 constexpr float EPS = 1e-2;
 
@@ -70,7 +76,7 @@ auto matmul_naive_vs_cublas() -> int {
     gemm_1d_blocktiling<BN, BK, BM, TN><<<gdim, bdim>>>(d_c, d_a, d_b, n, k, m);
   };
 
-  auto kernel_exec = [&](auto &&f, const std::string& name) -> std::pair<std::string,i64> {
+  auto kernel_exec = [&](auto &&f, const string& name) -> pair<string,i64> {
     cudaEvent_t tst, tend;
     cudaEventCreate(&tst);
     cudaEventCreate(&tend);
@@ -83,11 +89,15 @@ auto matmul_naive_vs_cublas() -> int {
     return {name, get_microseconds(tst, tend)};
   };
 
-  auto run = [&](int iter_num, std::string name, float eps) -> int {
+  auto run = [&](int iter_num, string name, float eps) -> int {
     cublasCreate_v2(&handle);
-    std::map<std::string, i64> times;
-    auto rec = [&](const std::pair<std::string, i64> &r) -> void {
-      times[r.first] += r.second;
+    map<string, vector<i64>> times;
+    auto rec = [&](const pair<string, i64> &r) -> void {
+      times[r.first].push_back(r.second);
+    };
+    auto median = [](vector<i64> v) -> i64 {
+      sort(v.begin(), v.end());
+      return v[v.size() / 2];
     };
     
     for (int iter=0; iter<iter_num; iter++) {
@@ -100,15 +110,17 @@ auto matmul_naive_vs_cublas() -> int {
       rec(kernel_exec(F_gemm_1d_blocktiling, "gemm_1d_blocktiling"));
     }
 
-    std::map<std::string, double> flops;
+    map<string, double> flops;
+    map<string, i64> mtm;
     for (auto &[tk, tv] : times) {
-      tv /= iter_num;
-      flops[tk] = ((2.0 * n * m * k / tv)) / 1e3;
+      auto med = median(tv);
+      mtm[tk] = med;
+      flops[tk] = ((2.0 * n * m * k / med)) / 1e3;
     }
 
     for (auto &[tk, tv] : times) {
-      std::printf("%s avg %s time: %ld\n", name.c_str(), tk.c_str(), tv);
-      std::printf("%s avg %s gflops: %lf\n", name.c_str(), tk.c_str(), flops[tk]);
+      printf("%s p50 %s time: %ld µs\n", name.c_str(), tk.c_str(), mtm[tk]);
+      printf("%s p50 %s gflops: %lf\n", name.c_str(), tk.c_str(), flops[tk]);
     }
 
     cublasDestroy_v2(handle);
@@ -119,16 +131,16 @@ auto matmul_naive_vs_cublas() -> int {
   int perf_runs = 100;
 
   if(auto err = run(warmup_runs, "warmup", EPS); err != 0) {
-    std::printf("Warmup failed\n");
+    printf("Warmup failed\n");
     return err;
   }
-  std::printf("Warmup successfull, naive = cublas\n");
+  printf("Warmup OK\n");
 
   if (auto err = run(perf_runs, "perf", EPS); err != 0) {
-    std::printf("Perf failed\n");
+    printf("Perf failed\n");
     return err;
   } 
-  std::printf("Perf successfull, naive = cublas\n");
+  printf("Perf OK\n");
 
   cudaFree(d_a);
   cudaFree(d_b);
