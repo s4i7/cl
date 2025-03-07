@@ -116,3 +116,20 @@ TEST(GEMM_1D_BLOCKTILING_TEST, CheckEqualToCublas) {
 
   EXPECT_TRUE(vCublas(f));
 }
+
+TEST(GEMM_2D_BLOCKTILING_TEST, CheckEqualToCublas) {
+  auto f = [&](float *d_a, float *d_b, float *d_c, int n, int k, int m) {
+    const int BN = 64;
+    const int BK = 8;
+    const int BM = 64;
+    const int TN = 8;
+    const int TM = 8;
+
+    dim3 gd(4096 / BN, 4096 / BM);
+    dim3 bd((BN / TN) * (BM / TM));
+
+    gemm_2d_blocktiling<BN, BK, BM, TN, TM><<<gd, bd>>>(d_c, d_a, d_b, n, k, m);
+  };
+
+  EXPECT_TRUE(vCublas(f));
+}

@@ -92,3 +92,50 @@ __global__ void gemm_1d_blocktiling(float *c, float *a, float *b, int n, int k, 
     c[(threadrow * TN + rI) * m + threadcol] = tv[rI];
   }
 }
+
+template <const int BN, const int BK, const int BM, const int TN, const int TM>
+__global__ void gemm_2d_blocktiling(float *c, float *a, float *b, int n, int k, int m) {
+  const int crow = blockIdx.x * BN;
+  const int ccol = blockIdx.y * BM;
+  const int threadrow = threadIdx.x / BM;
+  const int threadcol = threadIdx.x % BM;
+  __shared__ float As[BN * BK];
+  __shared__ float Bs[BK * BM];
+
+  a += crow * k;
+  b += ccol;
+  c += crow * m + ccol;
+
+  const int asRow = threadIdx.x / BK;
+  const int asCol = threadIdx.x % BK;
+  const int bsRow = threadIdx.x / BM;
+  const int bsCol = threadIdx.x % BM;
+
+  float tv[TN][TM] = {0.0};
+
+  for (int block_idx = 0; block_idx < k; block_idx += BK) {
+    As[asRow * BK + asCol] = a[asRow * k + asCol];
+    Bs[bsRow * BM + bsCol] = b[bsRow * m + bsCol];
+
+    __syncthreads();
+    a += BK;
+    b += BK * m; 
+
+    for (int bsI=0; bsI < BK; bsI++) {
+      for (int rI=0; rI < TN; rI++) {
+        float asv = As[(threadrow * TN + rI) * BK + bsI];
+        for (int cI=0; cI < TM; cI++) {
+          tv[rI][cI] += asv * Bs[bsI * BM + (threadcol * TM + cI)];
+        }
+      }
+    }
+
+    __syncthreads();
+  }
+
+  for (int rI=0; rI < TN; rI++) {
+    for (int cI=0; cI < TM; cI++) {
+      c[(threadrow * TN + rI) * m + (threadcol * TM + cI)] = tv[rI][cI];
+    }
+  }
+}

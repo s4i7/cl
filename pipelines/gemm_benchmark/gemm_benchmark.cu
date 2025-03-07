@@ -13,7 +13,6 @@
 
 #include "gemm.cuh"
 #include "device.cuh"
-#include "macros.cuh"
 
 using i64 = int64_t;
 using namespace std;
@@ -76,6 +75,17 @@ auto matmul_naive_vs_cublas() -> int {
     gemm_1d_blocktiling<BN, BK, BM, TN><<<gdim, bdim>>>(d_c, d_a, d_b, n, k, m);
   };
 
+  auto F_gemm_2d_blocktiling = [&]() -> void {
+    const int BN = 64;
+    const int BM = 64;
+    const int BK = 8;
+    const int TN = 8;
+    const int TM = 8;
+    dim3 gdim(n / BN, m / BM);
+    dim3 bdim((BN / TN) * (BM / TM));
+    gemm_2d_blocktiling<BN, BK, BM, TN, TM><<<gdim, bdim>>>(d_c, d_a, d_b, n, k, m);
+  };
+
   auto kernel_exec = [&](auto &&f, const string& name) -> pair<string,i64> {
     cudaEvent_t tst, tend;
     cudaEventCreate(&tst);
@@ -108,6 +118,8 @@ auto matmul_naive_vs_cublas() -> int {
       rec(kernel_exec(F_cublas_sgemm, "cublas_sgemm"));
 
       rec(kernel_exec(F_gemm_1d_blocktiling, "gemm_1d_blocktiling"));
+
+      rec(kernel_exec(F_gemm_2d_blocktiling, "gemm_2d_blocktiling"));
     }
 
     map<string, double> flops;
